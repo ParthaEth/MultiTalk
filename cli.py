@@ -175,7 +175,7 @@ def _load_json(path: str) -> Dict[str, Any]:
         raise RuntimeError(f"Failed to read JSON from {path}: {exc}") from exc
 
 
-def :quit_write_json(path: str, payload: Dict[str, Any]) -> None:
+def _write_json(path: str, payload: Dict[str, Any]) -> None:
     """
     @brief Write JSON content to disk.
     @param path File path to write.
