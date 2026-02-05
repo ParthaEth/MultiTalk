@@ -1,4 +1,4 @@
-AVATAR_DIR = './Input_outputs/input_files/sales_executive'
+AVATAR_DIR = '/home/web/partha/vidLink/video_generators/multitalk/Input_outputs/input_files/sales_executive'
 CKPT_DIR = './weights/Wan2.1-I2V-14B-480P'
 WAV2VEC_DIR = './weights/chinese-wav2vec2-base'
 KOKORO_DIR = './weights/Kokoro-82M'
