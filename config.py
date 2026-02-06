@@ -4,3 +4,7 @@ WAV2VEC_DIR = './weights/chinese-wav2vec2-base'
 KOKORO_DIR = './weights/Kokoro-82M'
 TTS_VOICE = './weights/Kokoro-82M/voices/af_heart.pt'
 SAMPLE_STEPS = 30
+
+# Time required to generate 1 second of video (in seconds).
+# For multitalk: 3 minutes per video second = 180 seconds
+TIME_PER_VIDEO_SECOND_SECONDS = 180.0
