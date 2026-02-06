@@ -14,6 +14,23 @@ from typing import Any, Dict, Tuple
 
 import config
 
+# Characters per second for speech duration estimation (matches app/services/eta_service.py)
+CHARS_PER_SECOND = 15.0
+
+
+def _estimate_speech_duration_seconds(speech_text: str) -> float | None:
+    """
+    @brief Estimate video duration in seconds from speech text using character count.
+    @param speech_text The speech text to estimate duration for.
+    @return Estimated duration in seconds, or None if speech_text is empty/missing.
+    """
+    if not speech_text or not isinstance(speech_text, str):
+        return None
+    
+    # Estimate duration: characters / characters_per_second
+    duration = len(speech_text) / CHARS_PER_SECOND
+    return duration
+
 
 def _run_command_streaming(command: list[str], cwd: str) -> None:
     """
@@ -227,6 +244,36 @@ def main() -> None:
 
     _ensure_kokoro_weights(repo_dir)
 
+    # Calculate frame_num and max_frames_num based on video duration
+    FPS = 25.0  # Video frames per second
+    speech_text = data.get("speech_text", "")
+    video_duration_seconds = _estimate_speech_duration_seconds(speech_text) if speech_text else None
+    
+    # Calculate frame_num: 33 if video < 81/25 seconds (3.24s), else 81
+    # frame_num must be 4n+1, so 33 = 4*8+1 and 81 = 4*20+1
+    if video_duration_seconds is not None and video_duration_seconds < (81 / FPS):
+        frame_num = 33
+    else:
+        frame_num = 81  # default
+    
+    # Calculate max_frames_num for longer videos
+    mode = data.get("mode", "streaming")
+    if mode == "clip":
+        max_frames_num = frame_num
+    else:
+        # Streaming mode: calculate frames needed based on video duration
+        if video_duration_seconds is not None:
+            # Calculate frames needed: duration * fps
+            frames_needed = int(video_duration_seconds * FPS)
+            # Ensure it's at least frame_num
+            max_frames_num = max(frame_num, frames_needed)
+            # Round up to next 4n+1 if needed (to match frame_num pattern)
+            remainder = (max_frames_num - 1) % 4
+            if remainder != 0:
+                max_frames_num = max_frames_num + (4 - remainder)
+        else:
+            max_frames_num = 1000  # default for streaming when duration unknown
+
     command = [
         sys.executable,
         os.path.join(repo_dir, "generate_multitalk.py"),
@@ -239,7 +286,7 @@ def main() -> None:
         "--sample_steps",
         str(data.get("sample_steps", getattr(config, "SAMPLE_STEPS", 40))),
         "--mode",
-        str(data.get("mode", "streaming")),
+        str(mode),
         "--num_persistent_param_in_dit",
         str(data.get("num_persistent_param_in_dit", 0)),
         "--audio_mode",
@@ -248,7 +295,13 @@ def main() -> None:
         audio_save_dir,
         "--save_file",
         os.path.splitext(args.output)[0],
+        "--frame_num",
+        str(frame_num),
     ]
+
+    # Add max_frames_num argument for streaming mode
+    if mode == "streaming":
+        command.extend(["--max_frames_num", str(max_frames_num)])
 
     if data.get("use_teacache", True):
         command.append("--use_teacache")
