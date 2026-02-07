@@ -6,5 +6,5 @@ TTS_VOICE = './weights/Kokoro-82M/voices/af_heart.pt'
 SAMPLE_STEPS = 30
 
 # Time required to generate 1 second of video (in seconds).
-# For multitalk: 5 minutes per video second = 300 seconds
-TIME_PER_VIDEO_SECOND_SECONDS = 300.0
+# For multitalk: 4 minutes per video second = 240 seconds
+TIME_PER_VIDEO_SECOND_SECONDS = 240.0
