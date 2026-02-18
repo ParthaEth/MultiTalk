@@ -384,32 +384,50 @@ def main() -> None:
     # Calculate frame_num and max_frames_num based on video duration
     FPS = 25.0  # Video frames per second
     speech_text = data.get("speech_text", "")
-    video_duration_seconds = _estimate_speech_duration_seconds(speech_text) if speech_text else None
-    
-    # Calculate frame_num: 33 if video < 81/25 seconds (3.24s), else 81
-    # frame_num must be 4n+1, so 33 = 4*8+1 and 81 = 4*20+1
-    if video_duration_seconds is not None and video_duration_seconds < (81 / FPS):
-        frame_num = 33
+    video_duration_seconds = (
+        _estimate_speech_duration_seconds(speech_text) if speech_text else None
+    )
+
+    # Choose the largest safe frame_num for this text, with safety margin.
+    # Keep it in [33, 81] and enforce frame_num = 4n+1.
+    MIN_FRAMES = 33   # 4*8 + 1
+    MAX_FRAMES = 81   # 4*20 + 1
+
+    if video_duration_seconds is not None:
+        # Estimated frames for the (TTS) audio, with a small safety margin
+        frames_estimated = int(video_duration_seconds * FPS)
+        frames_target = int(frames_estimated * 0.9) # 10% safety margin
+
+        # Clamp into [MIN_FRAMES, MAX_FRAMES]
+        frames_target = max(MIN_FRAMES, min(MAX_FRAMES, frames_target))
+
+        # frame_num must be 4n+1 -> round DOWN to nearest 4n+1 <= frames_target
+        remainder = (frames_target - 1) % 4
+        frame_num = frames_target - remainder
+        if frame_num < MIN_FRAMES:
+            frame_num = MIN_FRAMES
     else:
-        frame_num = 81  # default
-    
-    # Calculate max_frames_num for longer videos
-    mode = data.get("mode", "streaming")
-    if mode == "clip":
-        max_frames_num = frame_num
-    else:
-        # Streaming mode: calculate frames needed based on video duration
-        if video_duration_seconds is not None:
-            # Calculate frames needed: duration * fps
-            frames_needed = int(video_duration_seconds * FPS)
-            # Ensure it's at least frame_num
-            max_frames_num = max(frame_num, frames_needed)
-            # Round up to next 4n+1 if needed (to match frame_num pattern)
-            remainder = (max_frames_num - 1) % 4
-            if remainder != 0:
-                max_frames_num = max_frames_num + (4 - remainder)
-        else:
-            max_frames_num = 1000  # default for streaming when duration unknown
+        # Unknown duration: fall back to the most conservative (max) clip length
+        frame_num = MAX_FRAMES
+
+    # # Calculate max_frames_num for longer videos
+    mode = "streaming"
+    # if mode == "clip":
+    #     max_frames_num = frame_num
+    # else:
+    #     # Streaming mode: calculate frames needed based on video duration
+    #     if video_duration_seconds is not None:
+    #         # Calculate frames needed: duration * fps
+    #         frames_needed = int(video_duration_seconds * FPS)
+    #         # Ensure it's at least frame_num
+    #         max_frames_num = max(frame_num, frames_needed)
+    #         # Round up to next 4n+1 if needed (to match frame_num pattern)
+    #         remainder = (max_frames_num - 1) % 4
+    #         if remainder != 0:
+    #             max_frames_num = max_frames_num + (4 - remainder)
+    #     else:
+    #         max_frames_num = 1000  # default for streaming when duration unknown
+    max_frames_num = 2000
 
     command = [
         sys.executable,
@@ -423,7 +441,7 @@ def main() -> None:
         "--sample_steps",
         str(data.get("sample_steps", getattr(config, "SAMPLE_STEPS", 40))),
         "--mode",
-        str(mode),
+        mode,
         "--num_persistent_param_in_dit",
         str(data.get("num_persistent_param_in_dit", 0)),
         "--audio_mode",
@@ -448,6 +466,7 @@ def main() -> None:
     finally:
         try:
             shutil.rmtree(work_dir)
+            # print(f"Skipping cleanup of work_dir: {work_dir}\n command ran \n {command}")
         except Exception:
             pass
 
