@@ -107,9 +107,12 @@ def _ensure_kokoro_weights(repo_dir: str) -> None:
 
 def _select_avatar_assets(avatar_dir: str) -> Tuple[str, str]:
     """
-    @brief Select the avatar JSON and image file from the avatar directory.
+    @brief Select the avatar configuration JSON and image file from a directory.
+    @details Finds the first .json file (assumed to be base.json or config) and
+             the first image file (.png, .jpg, .jpeg, or .webp) in the directory.
+             Files are selected in sorted order, so naming is predictable.
     @param avatar_dir Directory containing avatar assets.
-    @return Tuple of (json_path, image_path).
+    @return Tuple of (json_config_path, image_file_path).
     @throws RuntimeError if required files are missing.
     """
 
@@ -131,7 +134,7 @@ def _select_avatar_assets(avatar_dir: str) -> Tuple[str, str]:
 
     if not json_path or not image_path:
         raise RuntimeError(
-            f"Avatar directory must contain one json and one image file: {avatar_dir}"
+            f"Avatar directory must contain one JSON config file and one image file (.png/.jpg/.jpeg/.webp): {avatar_dir}"
         )
 
     return json_path, image_path
@@ -142,38 +145,47 @@ def _build_input_payload(
 ) -> Dict[str, Any]:
     """
     @brief Build the input payload expected by the multitalk generator.
+    @details Transforms avatar config JSON into the multitalk generator format:
+             - Extracts prompt and voice from avatar JSON
+             - Resolves image path to absolute path
+             - Converts voice name to path: weights/Kokoro-82M/voices/{voice}.pt
+             - Combines with speech_text from job data into tts_audio
     @param data Raw job data from the backend JSON file.
-    @param base_dir Base directory for resolving paths.
-    @param avatar_json Path to the base JSON file.
-    @param avatar_image Path to the avatar image file.
+    @param base_dir Base directory for resolving paths (repo directory).
+    @param avatar_json Path to the avatar config JSON file (e.g., base.json).
+    @param avatar_image Path to the avatar image file (e.g., executive.png).
     @return Payload dictionary ready for multitalk input_json.
     @throws RuntimeError when required fields are missing.
     """
 
-    payload = _load_json(avatar_json)
-    payload["cond_image"] = _resolve_path(base_dir, avatar_image)
-    if "cond_audio" not in payload:
-        payload["cond_audio"] = {}
-
-    tts_audio: Dict[str, Any] = data.get("tts_audio", {})
+    # Load avatar configuration
+    avatar_config = _load_json(avatar_json)
+    
+    # Extract required fields from avatar config
+    prompt = avatar_config.get("prompt")
+    if not prompt:
+        raise RuntimeError(f"Avatar config must contain 'prompt' field: {avatar_json}")
+    
+    voice = avatar_config.get("voice")
+    if not voice:
+        raise RuntimeError(f"Avatar config must contain 'voice' field: {avatar_json}")
+    
+    # Get speech text from job data
     speech_text = data.get("speech_text")
     if not speech_text:
-        raise RuntimeError("speech_text is required for multitalk TTS mode")
-
-    tts_audio["text"] = speech_text
-
-    if tts_audio:
-        if "text" not in tts_audio:
-            raise RuntimeError("tts_audio provided but missing 'text'")
-        if "human1_voice" not in tts_audio:
-            tts_audio["human1_voice"] = config.TTS_VOICE
-        if "human2_voice" in tts_audio and tts_audio["human2_voice"]:
-            tts_audio["human2_voice"] = _resolve_path(
-                base_dir, tts_audio["human2_voice"]
-            )
-        tts_audio["human1_voice"] = _resolve_path(base_dir, tts_audio["human1_voice"])
-        payload["tts_audio"] = tts_audio
-
+        raise RuntimeError("speech_text is required in job data")
+    
+    # Build the payload in the expected format
+    payload = {
+        "prompt": prompt,
+        "cond_image": _resolve_path(base_dir, avatar_image),
+        "tts_audio": {
+            "text": speech_text,
+            "human1_voice": _resolve_path(base_dir, f"weights/Kokoro-82M/voices/{voice}.pt"),
+        },
+        "cond_audio": {},
+    }
+    
     return payload
 
 
@@ -225,7 +237,7 @@ def main() -> None:
     audio_save_dir = os.path.join(work_dir, "audio")
 
     data = _load_json(args.data)
-    avatar_json, avatar_image = _select_avatar_assets(config.AVATAR_DIR)
+    avatar_json, avatar_image = _select_avatar_assets(data.get("avatar"))
     payload = _build_input_payload(
         data=data,
         base_dir=repo_dir,
