@@ -218,7 +218,7 @@ def _build_input_from_template(
 ) -> Dict[str, Any]:
     """
     @brief Build an input payload using the checked-in base TTS template.
-    @details Used when the caller supplies a ``projectAvatar`` signed S3 URL.
+    @details Used when the caller supplies a ``avatar`` name (found in S3 bucket under ``avatars/``)
              The template's ``cond_image``, ``tts_audio.text``, and ``tts_audio.human1_voice``
              are replaced with the caller-provided values.
     @param data Raw job data dictionary.
