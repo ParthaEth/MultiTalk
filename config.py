@@ -7,4 +7,4 @@ SAMPLE_STEPS = 30
 
 # Time required to generate 1 second of video (in seconds).
 # For multitalk: 4 minutes per video second = 240 seconds
-TIME_PER_VIDEO_SECOND_SECONDS = 240.0
+TIME_PER_VIDEO_SECOND_SECONDS = 300.0

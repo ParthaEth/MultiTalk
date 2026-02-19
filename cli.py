@@ -11,6 +11,9 @@ import subprocess
 import sys
 import uuid
 from typing import Any, Dict, Tuple
+from urllib.parse import urlparse
+
+import requests
 
 import config
 
@@ -140,6 +143,117 @@ def _select_avatar_assets(avatar_dir: str) -> Tuple[str, str]:
     return json_path, image_path
 
 
+def _download_avatar_from_url(url: str, dest_dir: str) -> str:
+    """
+    @brief Download an avatar image from a signed S3 URL.
+    @param url Presigned S3 URL to download the image from.
+    @param dest_dir Local directory to save the downloaded image.
+    @return Absolute path to the downloaded image file.
+    @throws RuntimeError if the download fails.
+    """
+
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # Try to derive image extension from the URL path (ignoring query params).
+    parsed = urlparse(url)
+    _, url_ext = os.path.splitext(parsed.path)
+    url_ext = url_ext.lower()
+    if url_ext not in (".png", ".jpg", ".jpeg", ".webp"):
+        url_ext = ""  # will be determined from Content-Type
+
+    try:
+        response = requests.get(url, timeout=120)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Failed to download avatar from presigned URL: {exc}"
+        ) from exc
+
+    # Determine extension from Content-Type header if URL didn't reveal one.
+    if not url_ext:
+        content_type = response.headers.get("Content-Type", "")
+        ct_map = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }
+        for ct, ext in ct_map.items():
+            if ct in content_type:
+                url_ext = ext
+                break
+        if not url_ext:
+            url_ext = ".png"  # safe default
+
+    local_path = os.path.join(dest_dir, f"avatar{url_ext}")
+    with open(local_path, "wb") as fh:
+        fh.write(response.content)
+
+    return os.path.abspath(local_path)
+
+
+def _resolve_voice_path(preferred_voice: str | None, base_dir: str) -> str:
+    """
+    @brief Resolve a preferred voice identifier to an absolute voice file path.
+    @details Accepts a full relative path (e.g. ``weights/Kokoro-82M/voices/af_heart.pt``),
+             a filename (``af_heart.pt``), or just a voice name (``af_heart``).
+    @param preferred_voice Voice identifier supplied by the caller. May be *None*.
+    @param base_dir Base directory for relative path resolution (multitalk repo root).
+    @return Absolute path to the voice ``.pt`` file.
+    """
+
+    if not preferred_voice:
+        return _resolve_path(base_dir, config.TTS_VOICE)
+
+    # Already looks like a path (contains separator or ends with .pt)
+    if "/" in preferred_voice or preferred_voice.endswith(".pt"):
+        return _resolve_path(base_dir, preferred_voice)
+
+    # Bare voice name → resolve inside the Kokoro voices directory.
+    voice_path = f"weights/Kokoro-82M/voices/{preferred_voice}.pt"
+    return _resolve_path(base_dir, voice_path)
+
+
+def _build_input_from_template(
+    data: Dict[str, Any], base_dir: str, avatar_image_path: str
+) -> Dict[str, Any]:
+    """
+    @brief Build an input payload using the checked-in base TTS template.
+    @details Used when the caller supplies a ``projectAvatar`` signed S3 URL.
+             The template's ``cond_image``, ``tts_audio.text``, and ``tts_audio.human1_voice``
+             are replaced with the caller-provided values.
+    @param data Raw job data dictionary.
+    @param base_dir Multitalk repo directory (for path resolution).
+    @param avatar_image_path Absolute path to the downloaded avatar image.
+    @return Payload dictionary ready for multitalk ``input_json``.
+    @throws RuntimeError when required fields are missing.
+    """
+
+    template_path = os.path.join(base_dir, "base_tts_template.json")
+    payload = _load_json(template_path)
+
+    # Replace the avatar image with the downloaded one.
+    payload["cond_image"] = avatar_image_path
+
+    if "cond_audio" not in payload:
+        payload["cond_audio"] = {}
+
+    # Speech text is mandatory.
+    speech_text = data.get("speech_text")
+    if not speech_text:
+        raise RuntimeError("speech_text is required for multitalk TTS mode")
+
+    # Resolve the voice file path.
+    preferred_voice = data.get("preferredVoice")
+    voice_path = _resolve_voice_path(preferred_voice, base_dir)
+
+    payload["tts_audio"] = {
+        "text": speech_text,
+        "human1_voice": voice_path,
+    }
+
+    return payload
+
+
 def _build_input_payload(
     data: Dict[str, Any], base_dir: str, avatar_json: str, avatar_image: str
 ) -> Dict[str, Any]:
@@ -259,32 +373,50 @@ def main() -> None:
     # Calculate frame_num and max_frames_num based on video duration
     FPS = 25.0  # Video frames per second
     speech_text = data.get("speech_text", "")
-    video_duration_seconds = _estimate_speech_duration_seconds(speech_text) if speech_text else None
-    
-    # Calculate frame_num: 33 if video < 81/25 seconds (3.24s), else 81
-    # frame_num must be 4n+1, so 33 = 4*8+1 and 81 = 4*20+1
-    if video_duration_seconds is not None and video_duration_seconds < (81 / FPS):
-        frame_num = 33
+    video_duration_seconds = (
+        _estimate_speech_duration_seconds(speech_text) if speech_text else None
+    )
+
+    # Choose the largest safe frame_num for this text, with safety margin.
+    # Keep it in [33, 81] and enforce frame_num = 4n+1.
+    MIN_FRAMES = 33   # 4*8 + 1
+    MAX_FRAMES = 81   # 4*20 + 1
+
+    if video_duration_seconds is not None:
+        # Estimated frames for the (TTS) audio, with a small safety margin
+        frames_estimated = int(video_duration_seconds * FPS)
+        frames_target = int(frames_estimated * 0.9) # 10% safety margin
+
+        # Clamp into [MIN_FRAMES, MAX_FRAMES]
+        frames_target = max(MIN_FRAMES, min(MAX_FRAMES, frames_target))
+
+        # frame_num must be 4n+1 -> round DOWN to nearest 4n+1 <= frames_target
+        remainder = (frames_target - 1) % 4
+        frame_num = frames_target - remainder
+        if frame_num < MIN_FRAMES:
+            frame_num = MIN_FRAMES
     else:
-        frame_num = 81  # default
-    
-    # Calculate max_frames_num for longer videos
-    mode = data.get("mode", "streaming")
-    if mode == "clip":
-        max_frames_num = frame_num
-    else:
-        # Streaming mode: calculate frames needed based on video duration
-        if video_duration_seconds is not None:
-            # Calculate frames needed: duration * fps
-            frames_needed = int(video_duration_seconds * FPS)
-            # Ensure it's at least frame_num
-            max_frames_num = max(frame_num, frames_needed)
-            # Round up to next 4n+1 if needed (to match frame_num pattern)
-            remainder = (max_frames_num - 1) % 4
-            if remainder != 0:
-                max_frames_num = max_frames_num + (4 - remainder)
-        else:
-            max_frames_num = 1000  # default for streaming when duration unknown
+        # Unknown duration: fall back to the most conservative (max) clip length
+        frame_num = MAX_FRAMES
+
+    # # Calculate max_frames_num for longer videos
+    mode = "streaming"
+    # if mode == "clip":
+    #     max_frames_num = frame_num
+    # else:
+    #     # Streaming mode: calculate frames needed based on video duration
+    #     if video_duration_seconds is not None:
+    #         # Calculate frames needed: duration * fps
+    #         frames_needed = int(video_duration_seconds * FPS)
+    #         # Ensure it's at least frame_num
+    #         max_frames_num = max(frame_num, frames_needed)
+    #         # Round up to next 4n+1 if needed (to match frame_num pattern)
+    #         remainder = (max_frames_num - 1) % 4
+    #         if remainder != 0:
+    #             max_frames_num = max_frames_num + (4 - remainder)
+    #     else:
+    #         max_frames_num = 1000  # default for streaming when duration unknown
+    max_frames_num = 2000
 
     command = [
         sys.executable,
@@ -298,7 +430,7 @@ def main() -> None:
         "--sample_steps",
         str(data.get("sample_steps", getattr(config, "SAMPLE_STEPS", 40))),
         "--mode",
-        str(mode),
+        mode,
         "--num_persistent_param_in_dit",
         str(data.get("num_persistent_param_in_dit", 0)),
         "--audio_mode",
@@ -323,6 +455,7 @@ def main() -> None:
     finally:
         try:
             shutil.rmtree(work_dir)
+            # print(f"Skipping cleanup of work_dir: {work_dir}\n command ran \n {command}")
         except Exception:
             pass
 
