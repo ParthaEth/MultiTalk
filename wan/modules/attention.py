@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import os
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
@@ -10,17 +11,29 @@ from xfuser.core.distributed import (
 )
 import xformers.ops
 
-try:
-    import flash_attn_interface
-    FLASH_ATTN_3_AVAILABLE = True
-except ModuleNotFoundError:
-    FLASH_ATTN_3_AVAILABLE = False
+_DISABLE_FLASH_ATTN = os.getenv("WAN_DISABLE_FLASH_ATTN", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
-try:
-    import flash_attn
-    FLASH_ATTN_2_AVAILABLE = True
-except ModuleNotFoundError:
+if _DISABLE_FLASH_ATTN:
+    FLASH_ATTN_3_AVAILABLE = False
     FLASH_ATTN_2_AVAILABLE = False
+    print("Flash attention is disabled by WAN_DISABLE_FLASH_ATTN environment variable.")
+else:
+    try:
+        import flash_attn_interface
+        FLASH_ATTN_3_AVAILABLE = True
+    except ModuleNotFoundError:
+        FLASH_ATTN_3_AVAILABLE = False
+
+    try:
+        import flash_attn
+        FLASH_ATTN_2_AVAILABLE = True
+    except ModuleNotFoundError:
+        FLASH_ATTN_2_AVAILABLE = False
 
 import warnings
 
@@ -61,6 +74,22 @@ def flash_attention(
     half_dtypes = (torch.float16, torch.bfloat16)
     assert dtype in half_dtypes
     assert q.device.type == 'cuda' and q.size(-1) <= 256
+
+    if not FLASH_ATTN_3_AVAILABLE and not FLASH_ATTN_2_AVAILABLE:
+        if q_lens is not None or k_lens is not None:
+            warnings.warn(
+                'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
+            )
+        attn_mask = None
+
+        q_sdpa = q.transpose(1, 2).to(dtype)
+        k_sdpa = k.transpose(1, 2).to(dtype)
+        v_sdpa = v.transpose(1, 2).to(dtype)
+
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q_sdpa, k_sdpa, v_sdpa, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
+
+        return out.transpose(1, 2).contiguous().type(q.dtype)
 
     # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
