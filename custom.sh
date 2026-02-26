@@ -9,4 +9,4 @@ python generate_multitalk.py \
     --mode streaming \
     --num_persistent_param_in_dit 0 \
     --audio_mode tts \
-    --audio_save_dir local_data/outreach_test
+    --audio_save_dir local_data/outreach_mighty

@@ -142,55 +142,6 @@ def _select_avatar_assets(avatar_dir: str) -> Tuple[str, str]:
 
     return json_path, image_path
 
-
-def _download_avatar_from_url(url: str, dest_dir: str) -> str:
-    """
-    @brief Download an avatar image from a signed S3 URL.
-    @param url Presigned S3 URL to download the image from.
-    @param dest_dir Local directory to save the downloaded image.
-    @return Absolute path to the downloaded image file.
-    @throws RuntimeError if the download fails.
-    """
-
-    os.makedirs(dest_dir, exist_ok=True)
-
-    # Try to derive image extension from the URL path (ignoring query params).
-    parsed = urlparse(url)
-    _, url_ext = os.path.splitext(parsed.path)
-    url_ext = url_ext.lower()
-    if url_ext not in (".png", ".jpg", ".jpeg", ".webp"):
-        url_ext = ""  # will be determined from Content-Type
-
-    try:
-        response = requests.get(url, timeout=120)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Failed to download avatar from presigned URL: {exc}"
-        ) from exc
-
-    # Determine extension from Content-Type header if URL didn't reveal one.
-    if not url_ext:
-        content_type = response.headers.get("Content-Type", "")
-        ct_map = {
-            "image/jpeg": ".jpg",
-            "image/png": ".png",
-            "image/webp": ".webp",
-        }
-        for ct, ext in ct_map.items():
-            if ct in content_type:
-                url_ext = ext
-                break
-        if not url_ext:
-            url_ext = ".png"  # safe default
-
-    local_path = os.path.join(dest_dir, f"avatar{url_ext}")
-    with open(local_path, "wb") as fh:
-        fh.write(response.content)
-
-    return os.path.abspath(local_path)
-
-
 def _resolve_voice_path(preferred_voice: str | None, base_dir: str) -> str:
     """
     @brief Resolve a preferred voice identifier to an absolute voice file path.
@@ -255,7 +206,7 @@ def _build_input_from_template(
 
 
 def _build_input_payload(
-    data: Dict[str, Any], base_dir: str, avatar_json: str, avatar_image: str
+    data: Dict[str, Any], base_dir: str,
 ) -> Dict[str, Any]:
     """
     @brief Build the input payload expected by the multitalk generator.
@@ -266,33 +217,32 @@ def _build_input_payload(
              - Combines with speech_text from job data into tts_audio
     @param data Raw job data from the backend JSON file.
     @param base_dir Base directory for resolving paths (repo directory).
-    @param avatar_json Path to the avatar config JSON file (e.g., base.json).
-    @param avatar_image Path to the avatar image file (e.g., executive.png).
     @return Payload dictionary ready for multitalk input_json.
     @throws RuntimeError when required fields are missing.
     """
 
-    # Load avatar configuration
-    avatar_config = _load_json(avatar_json)
-    
     # Extract required fields from avatar config
-    prompt = avatar_config.get("prompt")
+    prompt = data.get("video_prompt")  # Fallback to default prompt if not specified in avatar config
     if not prompt:
-        raise RuntimeError(f"Avatar config must contain 'prompt' field: {avatar_json}")
+        raise RuntimeError(f"Job data must contain 'video_prompt' field: {data}")
     
-    voice = avatar_config.get("voice")
+    voice = data.get("kokoro_voice")
     if not voice:
-        raise RuntimeError(f"Avatar config must contain 'voice' field: {avatar_json}")
-    
+        raise RuntimeError(f"Job data must contain 'kokoro_voice' field: {data}")
+
     # Get speech text from job data
     speech_text = data.get("speech_text")
     if not speech_text:
-        raise RuntimeError("speech_text is required in job data")
+        raise RuntimeError(f"Job data must contain 'speech_text' field: {data}")
     
+    avatar_path = data.get("avatar_path")
+    if not avatar_path:
+        raise RuntimeError(f"Job data must contain 'avatar_path' field: {data}")
+
     # Build the payload in the expected format
     payload = {
         "prompt": prompt,
-        "cond_image": _resolve_path(base_dir, avatar_image),
+        "cond_image": _resolve_path(base_dir, avatar_path),
         "tts_audio": {
             "text": speech_text,
             "human1_voice": _resolve_path(base_dir, f"weights/Kokoro-82M/voices/{voice}.pt"),
@@ -341,22 +291,24 @@ def main() -> None:
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--data", required=True)
+    parser.add_argument("--work-dir", default=None)
     args = parser.parse_args()
 
     repo_dir = os.path.dirname(os.path.abspath(__file__))
-    work_dir = os.path.join(repo_dir, "backend_runs", args.job_id)
+    
+    work_dir = args.work_dir
+    if work_dir is None:
+        print('WARNING: no --work-dir specified, using default "backend_runs/{job_id}"')
+        work_dir = os.path.join(repo_dir, "backend_runs", args.job_id)
     os.makedirs(work_dir, exist_ok=True)
 
-    input_json_path = os.path.join(work_dir, f"{uuid.uuid4().hex}.json")
+    input_json_path = os.path.join(work_dir, f"cond.json")
     audio_save_dir = os.path.join(work_dir, "audio")
 
     data = _load_json(args.data)
-    avatar_json, avatar_image = _select_avatar_assets(data.get("avatar"))
     payload = _build_input_payload(
         data=data,
         base_dir=repo_dir,
-        avatar_json=avatar_json,
-        avatar_image=avatar_image,
     )
     _write_json(input_json_path, payload)
 
