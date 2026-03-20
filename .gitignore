@@ -3,4 +3,4 @@ weights/
 local_data/
 save_audio/
 .vscode/
-.env
+*.env

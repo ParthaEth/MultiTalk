@@ -17,32 +17,18 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-try:
-    from lingo import (
-        Corpus,
-        Reference,
-        get_celery_app,
-        phrase,
-        scribble,
-        validate_channels,
-        verb,
-    )
-except ModuleNotFoundError:
-    workspace_lingo = Path(__file__).resolve().parents[3] / "lingo"
-    if workspace_lingo.exists():
-        sys.path.insert(0, str(workspace_lingo))
-    from lingo import (
-        Corpus,
-        Reference,
-        get_celery_app,
-        phrase,
-        scribble,
-        validate_channels,
-        verb,
-    )
+from lingo import (
+	Corpus,
+	Reference,
+	get_celery_app,
+	phrase,
+	scribble,
+	validate_channels,
+	verb,
+)
 
-TASK_TTS = "kokoro_tts"
-TASK_RENDER = "multitalk.video.render"
+# TASK_TTS = "kokoro_tts"
+# TASK_RENDER = "multitalk.video.render"
 
 
 def _repo_dir() -> Path:
@@ -193,23 +179,21 @@ def _run_multitalk_render(audio_file: Path, avatar_file: Path, video_prompt: str
 def dispatch_multitalk_pipeline(
     speech_text: str,
     voice_id: str,
-    avatar: Corpus,
+    avatar: Corpus[bytes],
     *,
     video_prompt: str | None = None,
     tts_param: Optional[KokoroSettings] = None,
     render_param: Optional[MultiTalkSettings] = None,
     dest: Optional[Reference] = None,
     timeout_seconds: int | None = None,
-) -> Corpus:
+) -> Corpus[bytes]:
     """Dispatch the two-step lingo pipeline and wait for completion."""
 
-    tts_step = phrase(TASK_TTS)(speech_text, voice_id, tts_param)
-    render_step = phrase(TASK_RENDER)(tts_step, avatar, video_prompt, dest, render_param)
+    tts_step = phrase('kokoro_tts')(speech_text, voice_id, tts_param)
+    render_step = phrase('multitalk.video.render')(tts_step, avatar, video_prompt, dest, render_param)
     dispatched = render_step.say()
     result = dispatched.get(timeout=timeout_seconds)
-    if isinstance(result, Corpus):
-        return result
-    return Corpus.model_validate(result)
+    return result
 
 
 # This worker requires Redis broker + MinIO for claim-check video destinations.
@@ -217,8 +201,8 @@ validate_channels(redis=True, minio=True, mongo=False)
 app = get_celery_app()
 
 
-@verb(TASK_TTS)
-def kokoro_tts(speech_text: str, voice_id: str, param: Optional[KokoroSettings] = None) -> Corpus:
+@verb('kokoro_tts')
+def kokoro_tts(speech_text: str, voice_id: str, param: Optional[KokoroSettings] = None) -> Corpus[bytes]:
     if param is None:
         param = KokoroSettings()
 
@@ -263,14 +247,14 @@ def kokoro_tts(speech_text: str, voice_id: str, param: Optional[KokoroSettings] 
     return Corpus.from_file(str(output_path), content_type="audio/wav")
 
 
-@verb(TASK_RENDER)
+@verb('multitalk.video.render')
 def render_multitalk(
-    audio: Corpus,
-    avatar: Corpus,
+    audio: Corpus[bytes],
+    avatar: Corpus[bytes],
     video_prompt: str = None,
     dest: Optional[Reference] = None,
     param: Optional[MultiTalkSettings] = None,
-) -> Corpus:
+) -> Corpus[bytes]:
     if param is None:
         param = MultiTalkSettings()
     if video_prompt is None:
@@ -287,8 +271,8 @@ def render_multitalk(
     output_video = _run_multitalk_render(audio_path, avatar_path, video_prompt, param)
 
     if dest is None:
-        video_corpus = Corpus.from_file(str(output_video), content_type="video/mp4")
+        video_corpus = Corpus[bytes].from_file(str(output_video), content_type="video/mp4")
     else:
-        video_corpus = dest.dump(output_video)
+        video_corpus = dest.dump_file(output_video)
 
     return video_corpus
