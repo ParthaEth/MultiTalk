@@ -1,0 +1,3 @@
+[celery]
+app = "lingo_video_worker"
+name = "multitalk@%h"
