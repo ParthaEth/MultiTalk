@@ -12,23 +12,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import pytest
 from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from lingo import (
-	Corpus,
-	Reference,
-	speak,
-	phrase,
-	scribble,
-	speak,
-	verb,
-)
-
-# TASK_TTS = "kokoro_tts"
-# TASK_RENDER = "multitalk.video.render"
+from lingo import Corpus, Reference, Moderator, scribble, phrase, echo
+from lingo.storage import EmptyCorpus
+from lingo.celery import CeleryLanguage
 
 
 def _repo_dir() -> Path:
@@ -36,8 +28,9 @@ def _repo_dir() -> Path:
 
 
 class KokoroSettings(BaseModel):
-    language_code: str = "a"
-    repo_id: str = "weights/Kokoro-82M"
+    language_code: Optional[str] = None
+    repo_id: str = "hexgrad/Kokoro-82M"
+    repo_path: str = "weights/Kokoro-82M"
     speed: float = 1.0
     split_pattern: str = r"\n+"
     output_sample_rate: int = Field(default=16000, ge=1)
@@ -189,19 +182,38 @@ def dispatch_multitalk_pipeline(
 ) -> Corpus[bytes]:
     """Dispatch the two-step lingo pipeline and wait for completion."""
 
-    tts_step = phrase('kokoro_tts')(speech_text, voice_id, tts_param).local()
-    render_step = phrase('multitalk.video.render')(tts_step, avatar, video_prompt, dest, render_param)
-    dispatched = render_step.say()
-    result = dispatched.get(timeout=timeout_seconds)
-    return result
+    workflow = phrase("kokoro_tts")(speech_text, voice_id, None, tts_param).then(
+        "multitalk.video.render",
+        avatar,
+        video_prompt,
+        dest,
+        render_param,
+    )
+    mod = Moderator(lang)
+    job = mod.say(workflow)
+    out = job.result(block=True)
+    status = job.status()
+    if not status.succeeded():
+        raise RuntimeError(status.message or "multitalk pipeline failed")
+    return out
 
 
-# This worker requires Redis broker + MinIO for claim-check video destinations.
-lang = speak(redis=True, minio=True, mongo=False)
+lang = CeleryLanguage(name="multitalk@%h", routing_mode="task", scribble_root="local_data/local/")
 
 
-@verb('kokoro_tts')
-def kokoro_tts(speech_text: str, voice_id: str, param: Optional[KokoroSettings] = None) -> Corpus[bytes]:
+# endregion
+#####################################################
+# region Tasks
+#####################################################
+
+
+@lang.verb
+def kokoro_tts(
+    speech_text: str,
+    voice_id: str,
+    target: Optional[Reference[bytes]] = None,
+    param: Optional[KokoroSettings] = None,
+) -> Corpus[bytes]:
     if param is None:
         param = KokoroSettings()
 
@@ -220,8 +232,12 @@ def kokoro_tts(speech_text: str, voice_id: str, param: Optional[KokoroSettings] 
     if not Path(voice_path).exists():
         raise FileNotFoundError(f"Kokoro voice file not found: {voice_path}")
 
-    pipeline = KPipeline(lang_code=param.language_code, repo_id=param.repo_id)
-    voice_tensor = torch.load(voice_path, weights_only=True)
+    lang_code = param.language_code or voice_id[0]
+    pipeline = KPipeline(lang_code=lang_code, repo_id=param.repo_path)
+    try:
+        voice_tensor = torch.load(voice_path, weights_only=True)
+    except TypeError:
+        voice_tensor = torch.load(voice_path)
 
     chunks = []
     generator = pipeline(
@@ -231,22 +247,26 @@ def kokoro_tts(speech_text: str, voice_id: str, param: Optional[KokoroSettings] 
         split_pattern=param.split_pattern,
     )
     for _, _, audio in generator:
-        chunks.append(audio)
+        if audio is not None:
+            chunk = audio if isinstance(audio, torch.Tensor) else torch.tensor(audio)
+            chunks.append(chunk)
 
     if not chunks:
         raise RuntimeError("Kokoro produced no audio samples")
 
-    merged = torch.concat(chunks, dim=0)
-    sf.write(str(output_path), merged, 24000)
+    merged = torch.cat(chunks, dim=0)
+    sf.write(str(output_path), merged.numpy(), 24000)
 
     # Normalize sample rate for downstream consistency.
     wav_normalized, _ = librosa.load(str(output_path), sr=param.output_sample_rate)
     sf.write(str(output_path), wav_normalized, param.output_sample_rate)
 
-    return Corpus.from_file(str(output_path), content_type="audio/wav")
+    if target is None:
+        return Corpus.from_file(str(output_path), content_type="audio/wav")
+    return target.dump_file(output_path, content_type="audio/wav")
 
 
-@verb('multitalk.video.render')
+@lang.verb("multitalk.video.render")
 def render_multitalk(
     audio: Corpus[bytes],
     avatar: Corpus[bytes],
@@ -259,19 +279,96 @@ def render_multitalk(
     if video_prompt is None:
         video_prompt = param.video_prompt
 
-    audio_path = Path(audio.materialize_path())
+    run_dir = scribble()
+    audio_path = audio.materialize_to_file(run_dir / "tts_input.wav")
     if not audio_path.exists():
         raise FileNotFoundError(f"TTS audio could not be materialized: {audio_path}")
 
-    avatar_path = Path(avatar.materialize_path())
+    avatar_path = avatar.materialize_to_file(run_dir / "avatar_input.png")
     if not avatar_path.exists():
         raise FileNotFoundError(f"Avatar could not be materialized: {avatar_path}")
 
     output_video = _run_multitalk_render(audio_path, avatar_path, video_prompt, param)
 
     if dest is None:
-        video_corpus = Corpus[bytes].from_file(str(output_video), content_type="video/mp4")
+        video_corpus = Corpus.from_file(str(output_video), content_type="video/mp4")
     else:
-        video_corpus = dest.dump_file(output_video)
+        video_corpus = dest.dump_file(output_video, content_type="video/mp4")
 
     return video_corpus
+
+
+
+
+# endregion
+#####################################################
+# region Unit Tests
+#####################################################
+
+
+@lang.conversation
+def test_kokoro_tts_conversation(mod: Moderator, tmp_path: Path):
+    voice_dir = _repo_dir() / "weights" / "Kokoro-82M" / "voices"
+    if not voice_dir.exists():
+        pytest.skip(f"Kokoro voices directory missing: {voice_dir}")
+
+    voice_candidates = sorted(voice_dir.glob("*.pt"))
+    if not voice_candidates:
+        pytest.skip(f"No Kokoro voice weights found in: {voice_dir}")
+
+    try:
+        import torch  # noqa: F401
+        import librosa  # noqa: F401
+        import soundfile  # noqa: F401
+        from kokoro import KPipeline  # noqa: F401
+    except Exception as exc:
+        pytest.skip(f"Kokoro runtime dependencies unavailable: {exc}")
+
+    target = Reference.from_path(tmp_path / "audio.wav", content_type="audio/wav")
+    speech_text = "Hello, this is a test of Kokoro TTS in the MultiTalk worker."
+    # voice_id = voice_candidates[0].stem
+    voice_id = 'bf_isabella'
+
+    job = mod.say(phrase("kokoro_tts")(speech_text, voice_id, target, KokoroSettings()))
+
+    out = job.result(block=True)
+    status = job.status()
+
+    assert status.succeeded(), status.message or "kokoro_tts task failed"
+    assert out is not None
+    assert out.content_type == "audio/wav"
+    assert (tmp_path / "audio.wav").exists()
+
+
+@lang.conversation
+def test_multitalk_pipeline_conversation(mod: Moderator, tmp_path: Path):
+    target = Reference.from_path(tmp_path / "video.mp4", content_type="video/mp4")
+    avatar = Corpus.from_file(_repo_dir() / "assets" / "logo.png", content_type="image/png")
+
+    audio = echo("kokoro_tts", reply=EmptyCorpus(content_type="audio/wav"))(
+        "Hello, this is a mocked Kokoro task.",
+        "bf_isabella",
+        None,
+        None,
+    )
+
+    video = echo("multitalk.video.render", reply=EmptyCorpus(content_type="video/mp4"))(
+        audio,
+        avatar,
+        None,
+        target,
+        None,
+    )
+
+    job = mod.say(video)
+
+    out = job.result(block=True)
+    status = job.status()
+
+    assert status.succeeded(), status.message or "multitalk.video.render task failed"
+    assert out is not None
+    assert out.content_type == "video/mp4"
+
+
+# endregion
+#####################################################
