@@ -169,34 +169,6 @@ def _run_multitalk_render(audio_file: Path, avatar_file: Path, video_prompt: str
     return _find_generated_video(output_video_path)
 
 
-def dispatch_multitalk_pipeline(
-    speech_text: str,
-    voice_id: str,
-    avatar: Corpus[bytes],
-    *,
-    video_prompt: str | None = None,
-    tts_param: Optional[KokoroSettings] = None,
-    render_param: Optional[MultiTalkSettings] = None,
-    dest: Optional[Reference] = None,
-    timeout_seconds: int | None = None,
-) -> Corpus[bytes]:
-    """Dispatch the two-step lingo pipeline and wait for completion."""
-
-    workflow = phrase("kokoro_tts")(speech_text, voice_id, None, tts_param).then(
-        "multitalk.video.render",
-        avatar,
-        video_prompt,
-        dest,
-        render_param,
-    )
-    mod = Moderator(lang)
-    job = mod.say(workflow)
-    out = job.result(block=True)
-    status = job.status()
-    if not status.succeeded():
-        raise RuntimeError(status.message or "multitalk pipeline failed")
-    return out
-
 
 lang = CeleryLanguage(name="multitalk@%h", routing_mode="task", scribble_root="local_data/local/")
 
