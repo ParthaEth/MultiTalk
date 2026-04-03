@@ -170,13 +170,27 @@ def _run_multitalk_render(audio_file: Path, avatar_file: Path, video_prompt: str
 
 
 
-lang = CeleryLanguage(name="multitalk@%h", routing_mode="task", scribble_root="local_data/local/")
+lang = CeleryLanguage(name="multitalk@%h", routing_mode="task", scribble_root="local_data/local/", debug=True)
 
 
 # endregion
 #####################################################
 # region Tasks
 #####################################################
+
+
+@lang.verb
+def mock_job(
+    message: str,
+    dest: Optional[Reference[bytes]] = None,
+) -> Corpus[bytes]:
+    run_dir = scribble()
+    output_path = (run_dir / "mock_output.txt").resolve()
+    output_path.write_text(message, encoding="utf-8")
+
+    if dest is None:
+        return Corpus.from_file(str(output_path), content_type="text/plain")
+    return dest.dump_file(output_path, content_type="text/plain")
 
 
 @lang.verb
