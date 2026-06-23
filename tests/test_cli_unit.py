@@ -52,6 +52,12 @@ def test_estimate_audio_duration_seconds_for_wav_and_other_formats(tmp_path) -> 
     assert cli._estimate_audio_duration_seconds(str(mp3_path)) is None
 
 
+def test_guess_audio_extension_prefers_url_path_then_content_type() -> None:
+    assert cli._guess_audio_extension("https://example.com/audio.mp3", None) == ".mp3"
+    assert cli._guess_audio_extension("https://example.com/audio", "audio/mpeg") == ".mp3"
+    assert cli._guess_audio_extension("https://example.com/audio", None) == ".bin"
+
+
 def test_resolve_voice_path_supports_name_file_and_explicit_path(tmp_path) -> None:
     base_dir = str(tmp_path)
     cli.config.TTS_VOICE = "weights/Kokoro-82M/voices/default.pt"
@@ -112,6 +118,41 @@ def test_build_input_payload_uses_audio_file_when_present(tmp_path) -> None:
     assert payload["cond_image"] == os.path.join(base_dir, "avatar.png")
     assert payload["cond_audio"]["person1"] == os.path.join(base_dir, "voice.wav")
     assert "tts_audio" not in payload
+
+
+def test_resolve_input_audio_path_prefers_local_path_over_url(tmp_path) -> None:
+    resolved = cli._resolve_input_audio_path(
+        base_dir=str(tmp_path),
+        work_dir=str(tmp_path),
+        data={"audio_path": "voice.wav", "audio_url": "https://example.com/voice.mp3"},
+    )
+
+    assert resolved == os.path.join(str(tmp_path), "voice.wav")
+
+
+def test_resolve_input_audio_path_downloads_and_preprocesses_url(monkeypatch, tmp_path) -> None:
+    captured = {"download_url": None, "preprocess_path": None}
+
+    monkeypatch.setattr(
+        cli,
+        "_download_audio_from_url",
+        lambda audio_url, download_dir: captured.update({"download_url": audio_url}) or os.path.join(download_dir, "download.mp3"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_preprocess_audio_for_multitalk",
+        lambda audio_path, work_dir: captured.update({"preprocess_path": audio_path}) or os.path.join(work_dir, "normalized.wav"),
+    )
+
+    resolved = cli._resolve_input_audio_path(
+        base_dir=str(tmp_path),
+        work_dir=str(tmp_path),
+        data={"audio_url": "https://example.com/voice.mp3"},
+    )
+
+    assert captured["download_url"] == "https://example.com/voice.mp3"
+    assert captured["preprocess_path"] == os.path.join(str(tmp_path), "download.mp3")
+    assert resolved == os.path.join(str(tmp_path), "normalized.wav")
 
 
 def test_run_command_streaming_raises_with_tail_output(monkeypatch) -> None:
@@ -278,4 +319,72 @@ def test_main_uses_local_audio_mode_when_audio_file_is_supplied(monkeypatch, tmp
 
     command = captured["command"]
     assert "--audio_mode" in command
+    assert command[command.index("--audio_mode") + 1] == "localfile"
+
+
+def test_main_uses_audio_url_when_provided(monkeypatch, tmp_path) -> None:
+    ckpt_dir = tmp_path / "ckpt"
+    wav2vec_dir = tmp_path / "wav2vec"
+    ckpt_dir.mkdir()
+    wav2vec_dir.mkdir()
+
+    monkeypatch.setattr(cli.config, "CKPT_DIR", str(ckpt_dir))
+    monkeypatch.setattr(cli.config, "WAV2VEC_DIR", str(wav2vec_dir))
+
+    monkeypatch.setattr(
+        cli,
+        "_load_json",
+        lambda _path: {
+            "video_prompt": "intro",
+            "avatar_path": "avatar.png",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_resolve_input_audio_path",
+        lambda **kwargs: os.path.join(str(tmp_path), "normalized.wav"),
+    )
+    monkeypatch.setattr(cli, "_estimate_audio_duration_seconds", lambda _path: 1.5)
+
+    captured = {"command": None, "payload": None}
+
+    monkeypatch.setattr(
+        cli,
+        "_write_json",
+        lambda path, payload: captured.update({"write_path": path, "payload": payload}),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_command_streaming",
+        lambda command, cwd: captured.update({"command": command, "cwd": cwd}),
+    )
+    monkeypatch.setattr(cli, "_ensure_kokoro_weights", lambda _repo_dir: None)
+    monkeypatch.setattr(cli.shutil, "rmtree", lambda path: None)
+
+    output_path = tmp_path / "output.mp4"
+    data_path = tmp_path / "data.json"
+    work_dir = tmp_path / "work"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cli.py",
+            "--job-id",
+            "job123",
+            "--output",
+            str(output_path),
+            "--data",
+            str(data_path),
+            "--audio-url",
+            "https://example.com/voice.mp3",
+            "--work-dir",
+            str(work_dir),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["payload"]["cond_audio"]["person1"] == os.path.join(str(tmp_path), "normalized.wav")
+    command = captured["command"]
     assert command[command.index("--audio_mode") + 1] == "localfile"
