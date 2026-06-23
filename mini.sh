@@ -17,7 +17,8 @@ SCRIPT_TEXT="Hello, welcome to Meity, a world of avatars for outreach and CRM. I
 # af_kore.pt     am_echo.pt   am_santa.pt    bm_george.pt    hf_beta.pt   jf_nezumi.pt      zf_xiaoni.pt
 # af_nicole.pt   am_eric.pt   bf_alice.pt    bm_lewis.pt     hm_omega.pt  jf_tebukuro.pt    zf_xiaoxiao.pt
 
-IMAGE_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/local_data/avatars/greenscreen/green_woman4.png"
+# IMAGE_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/local_data/avatars/greenscreen/green_woman4.png"
+IMAGE_PATH="/mnt/c/Users/anwan/khan/notes/maitytx/cloud_data/avatars/elena.png"
 VOICE_PATH="weights/Kokoro-82M/voices/bf_isabella.pt"
 PROMPT="A professional speaks confidently directly to the camera."
 SCRIPT_TEXT="Hello, welcome to Meity, a world of avatars for outreach and CRM. I'll be your virtual assistant."
