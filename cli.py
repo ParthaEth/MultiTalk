@@ -5,11 +5,13 @@
 
 import argparse
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
 import sys
 import uuid
+import wave
 from typing import Any, Dict, Tuple
 from urllib.parse import urlparse
 
@@ -19,6 +21,28 @@ import config
 
 # Characters per second for speech duration estimation (matches app/services/eta_service.py)
 CHARS_PER_SECOND = 15.0
+
+
+def _guess_audio_extension(audio_url: str, content_type: str | None) -> str:
+    """
+    @brief Infer a suitable file extension for a downloaded audio asset.
+    @param audio_url Source URL for the audio asset.
+    @param content_type HTTP content type header value.
+    @return File extension including the leading dot.
+    """
+
+    url_path = urlparse(audio_url).path
+    url_ext = os.path.splitext(url_path)[1].lower()
+    if url_ext:
+        return url_ext
+
+    normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_type:
+        guessed_ext = mimetypes.guess_extension(normalized_type)
+        if guessed_ext:
+            return guessed_ext
+
+    return ".bin"
 
 
 def _estimate_speech_duration_seconds(speech_text: str) -> float | None:
@@ -33,6 +57,137 @@ def _estimate_speech_duration_seconds(speech_text: str) -> float | None:
     # Estimate duration: characters / characters_per_second
     duration = len(speech_text) / CHARS_PER_SECOND
     return duration
+
+
+def _estimate_audio_duration_seconds(audio_path: str) -> float | None:
+    """
+    @brief Estimate video duration in seconds from an input audio file.
+    @param audio_path Path to the input audio file.
+    @return Estimated duration in seconds, or None if audio_path is empty/missing.
+    @details WAV files are measured directly. Other formats fall back to None so the
+             wrapper can use the conservative default frame budget.
+    @throws RuntimeError when the audio file cannot be opened.
+    """
+
+    if not audio_path:
+        return None
+
+    try:
+        with wave.open(audio_path, "rb") as audio_handle:
+            frame_rate = audio_handle.getframerate()
+            if frame_rate <= 0:
+                return None
+            return audio_handle.getnframes() / float(frame_rate)
+    except wave.Error:
+        return None
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read audio file {audio_path}: {exc}") from exc
+
+
+def _download_audio_from_url(audio_url: str, download_dir: str) -> str:
+    """
+    @brief Download an audio asset from a URL into the working directory.
+    @param audio_url Remote URL to download.
+    @param download_dir Directory where the downloaded file should be stored.
+    @return Absolute path to the downloaded file.
+    @throws RuntimeError when the download fails.
+    """
+
+    if not audio_url:
+        raise RuntimeError("audio_url must not be empty")
+
+    try:
+        response = requests.get(audio_url, stream=True, timeout=(10, 300))
+        response.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to download audio from {audio_url}: {exc}") from exc
+
+    extension = _guess_audio_extension(audio_url, response.headers.get("content-type"))
+    download_path = os.path.join(download_dir, f"downloaded_audio_{uuid.uuid4().hex}{extension}")
+
+    try:
+        with open(download_path, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write downloaded audio to {download_path}: {exc}") from exc
+
+    return download_path
+
+
+def _preprocess_audio_for_multitalk(audio_path: str, work_dir: str) -> str:
+    """
+    @brief Normalize downloaded audio into a WAV file that MultiTalk can ingest predictably.
+    @param audio_path Source audio path.
+    @param work_dir Working directory for generated intermediates.
+    @return Path to the normalized audio file.
+    @throws RuntimeError when ffmpeg conversion fails.
+    """
+
+    ext = os.path.splitext(audio_path)[1].lower()
+    if ext == ".wav":
+        return audio_path
+
+    normalized_path = os.path.join(work_dir, f"normalized_audio_{uuid.uuid4().hex}.wav")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        audio_path,
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        normalized_path,
+    ]
+
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to preprocess audio file {audio_path}: {exc}") from exc
+
+    return normalized_path
+
+
+def _resolve_input_audio_path(
+    base_dir: str,
+    work_dir: str,
+    data: Dict[str, Any],
+    audio_path: str | None = None,
+    audio_url: str | None = None,
+) -> str | None:
+    """
+    @brief Resolve the audio source to a local file path for MultiTalk.
+    @details Precedence is CLI path, JSON path, CLI URL, JSON URL.
+             URL inputs are downloaded locally and normalized to WAV when needed.
+    @param base_dir Base directory for resolving relative local paths.
+    @param work_dir Working directory for downloaded and normalized assets.
+    @param data Raw job data.
+    @param audio_path Optional CLI-supplied local audio path.
+    @param audio_url Optional CLI-supplied audio URL.
+    @return Absolute local file path, or None if no audio source was provided.
+    """
+
+    preferred_path = audio_path or data.get("audio_path")
+    if preferred_path:
+        return _resolve_path(base_dir, preferred_path)
+
+    preferred_url = audio_url or data.get("audio_url")
+    if not preferred_url:
+        return None
+
+    downloaded_path = _download_audio_from_url(preferred_url, work_dir)
+    return _preprocess_audio_for_multitalk(downloaded_path, work_dir)
 
 
 def _run_command_streaming(command: list[str], cwd: str) -> None:
@@ -206,17 +361,17 @@ def _build_input_from_template(
 
 
 def _build_input_payload(
-    data: Dict[str, Any], base_dir: str,
+    data: Dict[str, Any], base_dir: str, audio_path: str | None = None
 ) -> Dict[str, Any]:
     """
     @brief Build the input payload expected by the multitalk generator.
-    @details Transforms avatar config JSON into the multitalk generator format:
-             - Extracts prompt and voice from avatar JSON
+    @details Transforms job JSON into the multitalk generator format:
              - Resolves image path to absolute path
-             - Converts voice name to path: weights/Kokoro-82M/voices/{voice}.pt
-             - Combines with speech_text from job data into tts_audio
+             - If audio input is present, uses cond_audio/person1 and skips TTS
+             - Otherwise resolves Kokoro voice and speech_text into tts_audio
     @param data Raw job data from the backend JSON file.
     @param base_dir Base directory for resolving paths (repo directory).
+    @param audio_path Optional local audio file path.
     @return Payload dictionary ready for multitalk input_json.
     @throws RuntimeError when required fields are missing.
     """
@@ -226,18 +381,27 @@ def _build_input_payload(
     if not prompt:
         raise RuntimeError(f"Job data must contain 'video_prompt' field: {data}")
     
+    avatar_path = data.get("avatar_path")
+    if not avatar_path:
+        raise RuntimeError(f"Job data must contain 'avatar_path' field: {data}")
+
+    resolved_audio_path = audio_path or data.get("audio_path")
+    if resolved_audio_path:
+        return {
+            "prompt": prompt,
+            "cond_image": _resolve_path(base_dir, avatar_path),
+            "cond_audio": {
+                "person1": _resolve_path(base_dir, resolved_audio_path),
+            },
+        }
+
     voice = data.get("kokoro_voice")
     if not voice:
         raise RuntimeError(f"Job data must contain 'kokoro_voice' field: {data}")
 
-    # Get speech text from job data
     speech_text = data.get("speech_text")
     if not speech_text:
         raise RuntimeError(f"Job data must contain 'speech_text' field: {data}")
-    
-    avatar_path = data.get("avatar_path")
-    if not avatar_path:
-        raise RuntimeError(f"Job data must contain 'avatar_path' field: {data}")
 
     # Build the payload in the expected format
     payload = {
@@ -291,6 +455,8 @@ def main() -> None:
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--data", required=True)
+    parser.add_argument("--audio", default=None)
+    parser.add_argument("--audio-url", default=None)
     parser.add_argument("--work-dir", default=None)
     args = parser.parse_args()
 
@@ -306,11 +472,20 @@ def main() -> None:
     audio_save_dir = os.path.join(work_dir, "audio")
 
     data = _load_json(args.data)
+    resolved_audio_path = _resolve_input_audio_path(
+        base_dir=repo_dir,
+        work_dir=work_dir,
+        data=data,
+        audio_path=args.audio,
+        audio_url=args.audio_url,
+    )
     payload = _build_input_payload(
         data=data,
         base_dir=repo_dir,
+        audio_path=resolved_audio_path,
     )
     _write_json(input_json_path, payload)
+    audio_mode = "localfile" if payload.get("cond_audio") else "tts"
 
     ckpt_dir = config.CKPT_DIR
     wav2vec_dir = config.WAV2VEC_DIR
@@ -320,14 +495,20 @@ def main() -> None:
     ckpt_dir = _resolve_path(repo_dir, ckpt_dir)
     wav2vec_dir = _resolve_path(repo_dir, wav2vec_dir)
 
-    _ensure_kokoro_weights(repo_dir)
+    if audio_mode == "tts":
+        _ensure_kokoro_weights(repo_dir)
 
     # Calculate frame_num and max_frames_num based on video duration
     FPS = 25.0  # Video frames per second
-    speech_text = data.get("speech_text", "")
-    video_duration_seconds = (
-        _estimate_speech_duration_seconds(speech_text) if speech_text else None
-    )
+    frames_estimated: int | None = None
+    if audio_mode == "localfile":
+        input_audio_path = payload["cond_audio"]["person1"]
+        video_duration_seconds = _estimate_audio_duration_seconds(input_audio_path)
+    else:
+        speech_text = data.get("speech_text", "")
+        video_duration_seconds = (
+            _estimate_speech_duration_seconds(speech_text) if speech_text else None
+        )
 
     # Choose the largest safe frame_num for this text, with safety margin.
     # Keep it in [33, 81] and enforce frame_num = 4n+1.
@@ -370,7 +551,7 @@ def main() -> None:
     #         max_frames_num = 1000  # default for streaming when duration unknown
     max_frames_num = 2000
 
-    if frames_estimated > max_frames_num:
+    if frames_estimated is not None and frames_estimated > max_frames_num:
         raise RuntimeError(f"Estimated frames {frames_estimated} is greater than max_frames_num {max_frames_num}. "
                             "Max runtime will be exceeded")
 
@@ -390,7 +571,7 @@ def main() -> None:
         "--num_persistent_param_in_dit",
         str(data.get("num_persistent_param_in_dit", 0)),
         "--audio_mode",
-        "tts",
+        audio_mode,
         "--audio_save_dir",
         audio_save_dir,
         "--save_file",

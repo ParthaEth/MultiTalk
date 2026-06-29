@@ -26,7 +26,7 @@ SCRIPT_TEXT="Hello, welcome to Meity, a world of avatars for outreach and CRM. I
 
 # 2. Use the variables inside the Heredoc
 
-OUTPUT_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/video_generators/multitalk/local_data/temp/mini.json"
+OUTPUT_PATH="/home/felix/khan/maity/vidLink/video_generators/multitalk/local_data/temp/mini.json"
 
 cat <<EOF > "$OUTPUT_PATH"
 {
