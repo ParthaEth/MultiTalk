@@ -3,3 +3,5 @@ weights/
 local_data/
 save_audio/
 .vscode/
+*.mp4
+.venv/
