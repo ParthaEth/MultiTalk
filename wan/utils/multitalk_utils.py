@@ -234,6 +234,108 @@ def cache_video(tensor,
         writer.close()
         return cache_file
 
+def _normalize_video_tensor_to_uint8(gen_video_samples):
+    """Convert MultiTalk tensor in [-1, 1] (C, T, H, W) to uint8 frames (T, H, W, C)."""
+    video = (gen_video_samples + 1) / 2  # C T H W
+    video = video.permute(1, 2, 3, 0).cpu().numpy()
+    return np.clip(video * 255, 0, 255).astype(np.uint8)
+
+
+class ChunkedVideoWriter:
+    """Stream decoded MultiTalk chunks to an mp4 so peak RAM stays O(chunk) not O(total)."""
+
+    def __init__(self, save_path_tmp, fps=25, quality=5):
+        self.save_path_tmp = save_path_tmp
+        self.fps = fps
+        self.quality = quality
+        self._writer = imageio.get_writer(
+            save_path_tmp, fps=fps, quality=quality, ffmpeg_params=None
+        )
+        self.frames_written = 0
+
+    def append(self, gen_video_samples):
+        """
+        Append a chunk tensor.
+
+        Args:
+            gen_video_samples: torch.Tensor in [-1, 1], shape (C, T, H, W) or (1, C, T, H, W).
+        """
+        if gen_video_samples is None:
+            return 0
+        if gen_video_samples.ndim == 5:
+            gen_video_samples = gen_video_samples[0]
+        if gen_video_samples.shape[1] <= 0:
+            return 0
+        frames = _normalize_video_tensor_to_uint8(gen_video_samples)
+        for frame in frames:
+            self._writer.append_data(np.array(frame))
+        written = int(frames.shape[0])
+        self.frames_written += written
+        return written
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+
+def mux_video_with_audio(save_path_tmp, save_path, vocal_audio_list, frame_count, fps=25, high_quality_save=False):
+    """Crop audio to video duration and mux with an already-written silent temp mp4."""
+    duration = frame_count / fps
+    save_path_crop_audio = save_path + "-cropaudio.wav"
+    final_command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        vocal_audio_list[0],
+        "-t",
+        f'{duration}',
+        save_path_crop_audio,
+    ]
+    subprocess.run(final_command, check=True)
+
+    output_path = save_path + ".mp4"
+    if high_quality_save:
+        final_command = [
+            "ffmpeg",
+            "-y",
+            "-i", save_path_tmp,
+            "-i", save_path_crop_audio,
+            "-c:v", "libx264",
+            "-crf", "0",
+            "-preset", "veryslow",
+            "-c:a", "aac",
+            "-shortest",
+            output_path,
+        ]
+    else:
+        final_command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            save_path_tmp,
+            "-i",
+            save_path_crop_audio,
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+            output_path,
+        ]
+    subprocess.run(final_command, check=True)
+    os.remove(save_path_tmp)
+    os.remove(save_path_crop_audio)
+    return output_path
+
+
 def save_video_ffmpeg(gen_video_samples, save_path, vocal_audio_list, fps=25, quality=5, high_quality_save=False):
     
     def save_video(frames, save_path, fps, quality=9, ffmpeg_params=None):
@@ -256,61 +358,18 @@ def save_video_ffmpeg(gen_video_samples, save_path, vocal_audio_list, fps=25, qu
                     value_range=(-1, 1)
                     )
     else:
-        video_audio = (gen_video_samples+1)/2 # C T H W
-        video_audio = video_audio.permute(1, 2, 3, 0).cpu().numpy()
-        video_audio = np.clip(video_audio * 255, 0, 255).astype(np.uint8)  # to [0, 255]
+        video_audio = _normalize_video_tensor_to_uint8(gen_video_samples)
         save_video(video_audio, save_path_tmp, fps=fps, quality=quality)
 
-
-    # crop audio according to video length
     _, T, _, _ = gen_video_samples.shape
-    duration = T / fps
-    save_path_crop_audio = save_path + "-cropaudio.wav"
-    final_command = [
-        "ffmpeg",
-        "-i",
-        vocal_audio_list[0],
-        "-t",
-        f'{duration}',
-        save_path_crop_audio,
-    ]
-    subprocess.run(final_command, check=True)
-
-    save_path = save_path + ".mp4"
-    if high_quality_save:
-        final_command = [
-            "ffmpeg",
-            "-y",
-            "-i", save_path_tmp,
-            "-i", save_path_crop_audio,
-            "-c:v", "libx264",
-            "-crf", "0",
-            "-preset", "veryslow",
-            "-c:a", "aac", 
-            "-shortest",
-            save_path,
-        ]
-        subprocess.run(final_command, check=True)
-        os.remove(save_path_tmp)
-        os.remove(save_path_crop_audio)
-    else:
-        final_command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            save_path_tmp,
-            "-i",
-            save_path_crop_audio,
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            "-shortest",
-            save_path,
-        ]
-        subprocess.run(final_command, check=True)
-        os.remove(save_path_tmp)
-        os.remove(save_path_crop_audio)
+    mux_video_with_audio(
+        save_path_tmp=save_path_tmp,
+        save_path=save_path,
+        vocal_audio_list=vocal_audio_list,
+        frame_count=T,
+        fps=fps,
+        high_quality_save=high_quality_save,
+    )
 
 
 class MomentumBuffer:

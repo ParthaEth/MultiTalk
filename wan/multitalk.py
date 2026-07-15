@@ -359,7 +359,8 @@ class MultiTalkPipeline:
                  face_scale=0.05,
                  progress=True,
                  color_correction_strength=0.0,
-                 extra_args=None):
+                 extra_args=None,
+                 video_writer=None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -377,6 +378,10 @@ class MultiTalkPipeline:
                 Random seed for noise generation. If -1, use random seed
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            video_writer (*optional*):
+                ChunkedVideoWriter that receives each finalized chunk immediately so peak
+                CPU RAM stays O(chunk) instead of O(total frames). When provided, returns
+                the number of frames written instead of a full video tensor.
         """
 
         # init teacache
@@ -465,7 +470,9 @@ class MultiTalkPipeline:
         cur_motion_frames_num = 1
         audio_start_idx = 0
         audio_end_idx = audio_start_idx + clip_length
-        gen_video_list = []
+        gen_video_list = [] if video_writer is None else None
+        miss_lengths = [0]
+        frames_written = 0
         torch_gc()
 
         # set random seed and init noise
@@ -743,9 +750,44 @@ class MultiTalkPipeline:
             # >>> END OF COLOR CORRECTION STEP <<<
 
             if is_first_clip:
-                gen_video_list.append(videos)
+                chunk_to_keep = videos
             else:
-                gen_video_list.append(videos[:, :, cur_motion_frames_num:])
+                chunk_to_keep = videos[:, :, cur_motion_frames_num:]
+
+            # Final-chunk trim is known before this iteration when arrive_last_frame was set.
+            if arrive_last_frame and max_frames_num > frame_num and sum(miss_lengths) > 0:
+                trim = int(miss_lengths[0])
+                if trim > 0:
+                    if trim >= chunk_to_keep.shape[2]:
+                        chunk_to_keep = chunk_to_keep[:, :, :0]
+                    else:
+                        chunk_to_keep = chunk_to_keep[:, :, :-trim]
+
+            # Mirror prior full-concat cap: stop once max_frames_num frames are kept.
+            remaining = int(max_frames_num) - frames_written
+            if remaining <= 0:
+                chunk_to_keep = chunk_to_keep[:, :, :0]
+            elif chunk_to_keep.shape[2] > remaining:
+                chunk_to_keep = chunk_to_keep[:, :, :remaining]
+
+            chunk_to_keep = chunk_to_keep.to(torch.float32)
+
+            kept = int(chunk_to_keep.shape[2])
+            if video_writer is not None:
+                if self.rank == 0 and kept > 0:
+                    video_writer.append(chunk_to_keep)
+                frames_written += kept
+            else:
+                gen_video_list.append(chunk_to_keep)
+                frames_written += kept
+
+            # Capture motion frames for the next clip before releasing the full decode buffer.
+            next_cond_image = None
+            if not arrive_last_frame and max_frames_num > frame_num:
+                next_cond_image = videos[:, :, -motion_frame:].to(torch.float32).to(self.device)
+
+            del videos, chunk_to_keep
+            torch_gc()
 
             # decide whether is done
             if arrive_last_frame: break
@@ -754,7 +796,7 @@ class MultiTalkPipeline:
             is_first_clip = False
             cur_motion_frames_num = motion_frame
 
-            cond_image = videos[:, :, -cur_motion_frames_num:].to(torch.float32).to(self.device)
+            cond_image = next_cond_image
             audio_start_idx += (frame_num - cur_motion_frames_num)
             audio_end_idx = audio_start_idx + clip_length
 
@@ -782,11 +824,9 @@ class MultiTalkPipeline:
             if dist.is_initialized():
                 dist.barrier()
         
-        gen_video_samples = torch.cat(gen_video_list, dim=2)[:, :, :int(max_frames_num)] 
-        gen_video_samples = gen_video_samples.to(torch.float32)
-        if max_frames_num > frame_num and sum(miss_lengths) > 0:
-            # split video frames
-            gen_video_samples = gen_video_samples[:, :, :-1*miss_lengths[0]]
+        if video_writer is None:
+            # Final-chunk miss_lengths / max_frames_num trims already applied above.
+            gen_video_samples = torch.cat(gen_video_list, dim=2).to(torch.float32)
         
         if dist.is_initialized():
             dist.barrier()
@@ -794,4 +834,8 @@ class MultiTalkPipeline:
         del noise, latent
         torch_gc()
 
-        return gen_video_samples[0] if self.rank == 0 else None
+        if self.rank != 0:
+            return None
+        if video_writer is not None:
+            return frames_written
+        return gen_video_samples[0]

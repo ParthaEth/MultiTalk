@@ -16,10 +16,12 @@ import torch.distributed as dist
 from PIL import Image
 import subprocess
 
+import gc
+
 import wan
 from wan.configs import SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.utils.utils import cache_image, cache_video, str2bool
-from wan.utils.multitalk_utils import save_video_ffmpeg
+from wan.utils.multitalk_utils import ChunkedVideoWriter, mux_video_with_audio
 from kokoro import KPipeline
 from transformers import Wav2Vec2FeatureExtractor
 from src.audio_analysis.wav2vec2 import Wav2Vec2Model
@@ -583,6 +585,10 @@ def generate(args):
                 input_data['cond_audio']['person2'] = emb2_path
                 input_data['video_audio'] = sum_audio
 
+        # Free Wav2Vec2 before loading the 14B MultiTalk pipeline.
+        del audio_encoder, wav2vec_feature_extractor
+        gc.collect()
+
 
     logging.info("Creating MultiTalk pipeline.")
     wan_i2v = wan.MultiTalkPipeline(
@@ -607,34 +613,48 @@ def generate(args):
             num_persistent_param_in_dit=args.num_persistent_param_in_dit
         )
     
+    if args.save_file is None and rank == 0:
+        formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        formatted_prompt = input_data['prompt'].replace(" ", "_").replace("/",
+                                                                    "_")[:50]
+        args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
+
+    save_path_tmp = f"{args.save_file}-temp.mp4" if rank == 0 else None
+    video_writer = ChunkedVideoWriter(save_path_tmp) if rank == 0 else None
+
     logging.info("Generating video ...")
-    video = wan_i2v.generate(
-        input_data,
-        size_buckget=args.size,
-        motion_frame=args.motion_frame,
-        frame_num=args.frame_num,
-        shift=args.sample_shift,
-        sampling_steps=args.sample_steps,
-        text_guide_scale=args.sample_text_guide_scale,
-        audio_guide_scale=args.sample_audio_guide_scale,
-        seed=args.base_seed,
-        offload_model=args.offload_model,
-        max_frames_num=args.max_frames_num if args.max_frames_num is not None else (args.frame_num if args.mode == 'clip' else 1000),
-        color_correction_strength = args.color_correction_strength,
-        extra_args=args,
-        )
-    
+    try:
+        frames_written = wan_i2v.generate(
+            input_data,
+            size_buckget=args.size,
+            motion_frame=args.motion_frame,
+            frame_num=args.frame_num,
+            shift=args.sample_shift,
+            sampling_steps=args.sample_steps,
+            text_guide_scale=args.sample_text_guide_scale,
+            audio_guide_scale=args.sample_audio_guide_scale,
+            seed=args.base_seed,
+            offload_model=args.offload_model,
+            max_frames_num=args.max_frames_num if args.max_frames_num is not None else (args.frame_num if args.mode == 'clip' else 1000),
+            color_correction_strength = args.color_correction_strength,
+            extra_args=args,
+            video_writer=video_writer,
+            )
+    finally:
+        if video_writer is not None:
+            video_writer.close()
 
     if rank == 0:
-        
-        if args.save_file is None:
-            formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            formatted_prompt = input_data['prompt'].replace(" ", "_").replace("/",
-                                                                        "_")[:50]
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
-        
-        logging.info(f"Saving generated video to {args.save_file}.mp4")
-        save_video_ffmpeg(video, args.save_file, [input_data['video_audio']], high_quality_save=False)
+        frame_count = frames_written if frames_written is not None else video_writer.frames_written
+        logging.info(f"Saving generated video to {args.save_file}.mp4 ({frame_count} frames)")
+        mux_video_with_audio(
+            save_path_tmp=save_path_tmp,
+            save_path=args.save_file,
+            vocal_audio_list=[input_data['video_audio']],
+            frame_count=frame_count,
+            fps=25,
+            high_quality_save=False,
+        )
         
     logging.info("Finished.")
 
