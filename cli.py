@@ -587,6 +587,31 @@ def main() -> None:
     if data.get("use_teacache", True):
         command.append("--use_teacache")
 
+    # FusionX LoRA path: 8-step acceleration. Do not pass sample_audio_guide_scale so
+    # generate_multitalk keeps its default (4.0) for stronger lip sync.
+    lora_dir = data.get("lora_dir", getattr(config, "LORA_DIR", "") or "")
+    if str(lora_dir).strip():
+        lora_path = _resolve_path(repo_dir, str(lora_dir).strip())
+        if not os.path.isfile(lora_path):
+            raise RuntimeError(f"LoRA weights not found: {lora_path}")
+        command.extend(
+            [
+                "--lora_dir",
+                lora_path,
+                "--lora_scale",
+                str(data.get("lora_scale", getattr(config, "LORA_SCALE", 1.0))),
+                "--sample_shift",
+                str(data.get("sample_shift", getattr(config, "SAMPLE_SHIFT", 2))),
+                "--sample_text_guide_scale",
+                str(
+                    data.get(
+                        "sample_text_guide_scale",
+                        getattr(config, "SAMPLE_TEXT_GUIDE_SCALE", 1.0),
+                    )
+                ),
+            ]
+        )
+
     try:
         _run_command_streaming(command, cwd=repo_dir)
     finally:

@@ -182,6 +182,7 @@ def test_main_builds_expected_command_and_cleans_workdir(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(cli.config, "CKPT_DIR", str(ckpt_dir))
     monkeypatch.setattr(cli.config, "WAV2VEC_DIR", str(wav2vec_dir))
+    monkeypatch.setattr(cli.config, "LORA_DIR", "")
 
     monkeypatch.setattr(
         cli,
@@ -259,6 +260,7 @@ def test_main_uses_local_audio_mode_when_audio_file_is_supplied(monkeypatch, tmp
 
     monkeypatch.setattr(cli.config, "CKPT_DIR", str(ckpt_dir))
     monkeypatch.setattr(cli.config, "WAV2VEC_DIR", str(wav2vec_dir))
+    monkeypatch.setattr(cli.config, "LORA_DIR", "")
 
     monkeypatch.setattr(
         cli,
@@ -330,6 +332,7 @@ def test_main_uses_audio_url_when_provided(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(cli.config, "CKPT_DIR", str(ckpt_dir))
     monkeypatch.setattr(cli.config, "WAV2VEC_DIR", str(wav2vec_dir))
+    monkeypatch.setattr(cli.config, "LORA_DIR", "")
 
     monkeypatch.setattr(
         cli,
@@ -388,3 +391,72 @@ def test_main_uses_audio_url_when_provided(monkeypatch, tmp_path) -> None:
     assert captured["payload"]["cond_audio"]["person1"] == os.path.join(str(tmp_path), "normalized.wav")
     command = captured["command"]
     assert command[command.index("--audio_mode") + 1] == "localfile"
+
+
+def test_main_adds_fusionx_lora_flags_without_audio_guide_override(monkeypatch, tmp_path) -> None:
+    ckpt_dir = tmp_path / "ckpt"
+    wav2vec_dir = tmp_path / "wav2vec"
+    lora_path = tmp_path / "Wan2.1_I2V_14B_FusionX_LoRA.safetensors"
+    ckpt_dir.mkdir()
+    wav2vec_dir.mkdir()
+    lora_path.write_bytes(b"lora")
+
+    monkeypatch.setattr(cli.config, "CKPT_DIR", str(ckpt_dir))
+    monkeypatch.setattr(cli.config, "WAV2VEC_DIR", str(wav2vec_dir))
+    monkeypatch.setattr(cli.config, "LORA_DIR", str(lora_path))
+    monkeypatch.setattr(cli.config, "LORA_SCALE", 1.0)
+    monkeypatch.setattr(cli.config, "SAMPLE_STEPS", 8)
+    monkeypatch.setattr(cli.config, "SAMPLE_SHIFT", 2.0)
+    monkeypatch.setattr(cli.config, "SAMPLE_TEXT_GUIDE_SCALE", 1.0)
+
+    monkeypatch.setattr(
+        cli,
+        "_load_json",
+        lambda _path: {
+            "video_prompt": "intro",
+            "speech_text": "hello" * 50,
+            "kokoro_voice": "af_heart",
+            "avatar_path": "avatar.png",
+        },
+    )
+
+    captured = {"command": None}
+
+    monkeypatch.setattr(cli, "_write_json", lambda path, payload: None)
+    monkeypatch.setattr(
+        cli,
+        "_run_command_streaming",
+        lambda command, cwd: captured.update({"command": command, "cwd": cwd}),
+    )
+    monkeypatch.setattr(cli, "_ensure_kokoro_weights", lambda _repo_dir: None)
+    monkeypatch.setattr(cli.shutil, "rmtree", lambda path: None)
+
+    output_path = tmp_path / "output.mp4"
+    data_path = tmp_path / "data.json"
+    work_dir = tmp_path / "work"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cli.py",
+            "--job-id",
+            "job123",
+            "--output",
+            str(output_path),
+            "--data",
+            str(data_path),
+            "--work-dir",
+            str(work_dir),
+        ],
+    )
+
+    cli.main()
+
+    command = captured["command"]
+    assert command[command.index("--sample_steps") + 1] == "8"
+    assert command[command.index("--lora_dir") + 1] == str(lora_path)
+    assert command[command.index("--lora_scale") + 1] == "1.0"
+    assert command[command.index("--sample_shift") + 1] == "2.0"
+    assert command[command.index("--sample_text_guide_scale") + 1] == "1.0"
+    assert "--sample_audio_guide_scale" not in command
