@@ -339,6 +339,7 @@ def _build_input_from_template(
 
     # Replace the avatar image with the downloaded one.
     payload["cond_image"] = avatar_image_path
+    payload["prompt"] = getattr(config, "VIDEO_PROMPT", None) or "A person speaks to the camera."
 
     if "cond_audio" not in payload:
         payload["cond_audio"] = {}
@@ -366,6 +367,7 @@ def _build_input_payload(
     """
     @brief Build the input payload expected by the multitalk generator.
     @details Transforms job JSON into the multitalk generator format:
+             - Uses a short generic prompt (detailed text hurts FusionX lip sync)
              - Resolves image path to absolute path
              - If audio input is present, uses cond_audio/person1 and skips TTS
              - Otherwise resolves Kokoro voice and speech_text into tts_audio
@@ -376,11 +378,9 @@ def _build_input_payload(
     @throws RuntimeError when required fields are missing.
     """
 
-    # Extract required fields from avatar config
-    prompt = data.get("video_prompt")  # Fallback to default prompt if not specified in avatar config
-    if not prompt:
-        raise RuntimeError(f"Job data must contain 'video_prompt' field: {data}")
-    
+    # Detailed prompts pull motion toward the description and hurt lip sync.
+    prompt = getattr(config, "VIDEO_PROMPT", None) or "A person speaks to the camera."
+
     avatar_path = data.get("avatar_path")
     if not avatar_path:
         raise RuntimeError(f"Job data must contain 'avatar_path' field: {data}")
@@ -584,11 +584,14 @@ def main() -> None:
     if mode == "streaming":
         command.extend(["--max_frames_num", str(max_frames_num)])
 
-    if data.get("use_teacache", True):
+    use_teacache = data.get(
+        "use_teacache",
+        getattr(config, "USE_TEACACHE", False),
+    )
+    if use_teacache:
         command.append("--use_teacache")
 
-    # FusionX LoRA path: 8-step acceleration. Do not pass sample_audio_guide_scale so
-    # generate_multitalk keeps its default (4.0) for stronger lip sync.
+    # FusionX LoRA: 12 steps, text CFG 1.0, audio CFG 5.0 (stronger lip sync; no TeaCache).
     lora_dir = data.get("lora_dir", getattr(config, "LORA_DIR", "") or "")
     if str(lora_dir).strip():
         lora_path = _resolve_path(repo_dir, str(lora_dir).strip())
@@ -607,6 +610,13 @@ def main() -> None:
                     data.get(
                         "sample_text_guide_scale",
                         getattr(config, "SAMPLE_TEXT_GUIDE_SCALE", 1.0),
+                    )
+                ),
+                "--sample_audio_guide_scale",
+                str(
+                    data.get(
+                        "sample_audio_guide_scale",
+                        getattr(config, "SAMPLE_AUDIO_GUIDE_SCALE", 5.0),
                     )
                 ),
             ]

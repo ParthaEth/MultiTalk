@@ -1,5 +1,5 @@
 {
-    "prompt": "A confident representative speaks directly to the camera.",
+    "prompt": "A person speaks to the camera.",
     "cond_image": "Input_outputs/input_files/sales_executive/executive.png",
     "tts_audio": {
         "text": "example",
