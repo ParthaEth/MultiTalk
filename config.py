@@ -16,7 +16,7 @@ LORA_DIR = os.getenv(
     "./weights/Wan2.1_I2V_14B_FusionX_LoRA.safetensors",
 )
 LORA_SCALE = float(os.getenv("MULTI_TALK_LORA_SCALE", "1.0"))
-SAMPLE_STEPS = int(os.getenv("MULTI_TALK_SAMPLE_STEPS", "12"))
+SAMPLE_STEPS = int(os.getenv("MULTI_TALK_SAMPLE_STEPS", "8"))
 SAMPLE_SHIFT = float(os.getenv("MULTI_TALK_SAMPLE_SHIFT", "2"))
 # FusionX: low text CFG; higher audio CFG for stronger lip sync.
 SAMPLE_TEXT_GUIDE_SCALE = float(os.getenv("MULTI_TALK_SAMPLE_TEXT_GUIDE_SCALE", "1.0"))
