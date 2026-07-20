@@ -19,6 +19,7 @@ SCRIPT_TEXT="Hello, welcome to Meity, a world of avatars for outreach and CRM. I
 
 # IMAGE_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/local_data/avatars/greenscreen/green_woman4.png"
 IMAGE_PATH="/mnt/c/Users/anwan/khan/notes/maitytx/cloud_data/avatars/elena.png"
+IMAGE_PATH="examples/elena.png"
 VOICE_PATH="weights/Kokoro-82M/voices/bf_isabella.pt"
 PROMPT="A professional speaks confidently directly to the camera."
 SCRIPT_TEXT="Hello, welcome to Meity, a world of avatars for outreach and CRM. I'll be your virtual assistant."
@@ -26,7 +27,7 @@ SCRIPT_TEXT="Hello, welcome to Meity, a world of avatars for outreach and CRM. I
 
 # 2. Use the variables inside the Heredoc
 
-OUTPUT_PATH="/home/felix/khan/maity/vidLink/video_generators/multitalk/local_data/temp/mini.json"
+OUTPUT_PATH="/tmp/mini.json"
 
 cat <<EOF > "$OUTPUT_PATH"
 {
@@ -50,4 +51,4 @@ python generate_multitalk.py \
     --mode streaming \
     --num_persistent_param_in_dit 30 \
     --audio_mode tts \
-    --audio_save_dir local_data/sales_test
+    --audio_save_dir /tmp/
