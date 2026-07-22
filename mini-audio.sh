@@ -1,5 +1,5 @@
 
-export WAN_DISABLE_FLASH_ATTN="1"
+#export WAN_DISABLE_FLASH_ATTN="1"
 
 
 
@@ -7,9 +7,11 @@ export WAN_DISABLE_FLASH_ATTN="1"
 IMAGE_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/local_data/avatars/sales_executive/executive.png"
 PROMPT="A professional speaks confidently directly to the camera."
 AUDIO_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/local_data/audio-tests/google-german.wav"
-
+IMAGE_PATH="examples/elena.png"
+AUDIO_PATH="examples/audio.wav"
 
 OUTPUT_PATH="/mnt/c/Users/anwan/OneDrive/Khan/maity/vidLink/video_generators/multitalk/local_data/temp/audio.json"
+OUTPUT_PATH="/tmp/multitalk-audio.json"
 
 cat <<EOF > "$OUTPUT_PATH"
 {
